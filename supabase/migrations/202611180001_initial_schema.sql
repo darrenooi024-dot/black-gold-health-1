@@ -337,6 +337,254 @@ create policy ai_messages_owner_all on public.ai_messages for all to authenticat
 create policy device_sync_logs_owner_select on public.device_sync_logs for select to authenticated
  using(exists(select 1 from public.device_connections d where d.id=device_connection_id and d.user_id=(select auth.uid())));
 
+
+-- SECURITY HARDENING
+-- SECURITY DEFINER membership helper avoids recursive RLS when policies inspect
+-- couple_members from policies on couples/couple_members themselves.
+create or replace function public.is_active_couple_member(p_couple_id uuid, p_user_id uuid default auth.uid())
+returns boolean
+language sql
+stable
+security definer
+set search_path = public, auth, pg_temp
+set row_security = off
+as $
+ select exists (
+   select 1 from public.couple_members cm
+   where cm.couple_id = p_couple_id
+     and cm.user_id = p_user_id
+     and cm.member_status = 'active'
+ );
+$;
+revoke all on function public.is_active_couple_member(uuid,uuid) from public;
+grant execute on function public.is_active_couple_member(uuid,uuid) to authenticated;
+
+drop policy if exists couple_member_select on public.couples;
+create policy couple_member_select on public.couples
+ for select to authenticated
+ using (public.is_active_couple_member(id));
+
+drop policy if exists couple_member_select_members on public.couple_members;
+create policy couple_member_select_members on public.couple_members
+ for select to authenticated
+ using (
+   user_id = (select auth.uid())
+   or public.is_active_couple_member(couple_id)
+ );
+
+-- Create a private profile automatically whenever an auth account is registered.
+create or replace function public.handle_new_auth_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, auth, pg_temp
+as $
+begin
+ insert into public.profiles(user_id, display_name)
+ values (new.id, nullif(trim(coalesce(new.raw_user_meta_data->>'display_name','')), ''))
+ on conflict (user_id) do nothing;
+ return new;
+end;
+$;
+drop trigger if exists on_auth_user_created_profile on auth.users;
+create trigger on_auth_user_created_profile
+ after insert on auth.users
+ for each row execute function public.handle_new_auth_user();
+
+-- Invitation tokens are stored only as hashes. The raw token is returned once
+-- by create_couple_invite and must never be written to logs.
+create table public.couple_invitations (
+ id uuid primary key default gen_random_uuid(),
+ couple_id uuid not null references public.couples(id) on delete cascade,
+ invited_by uuid not null references public.profiles(user_id) on delete cascade,
+ invited_email text,
+ token_hash text not null unique,
+ expires_at timestamptz not null,
+ accepted_by uuid references public.profiles(user_id) on delete set null,
+ accepted_at timestamptz,
+ revoked_at timestamptz,
+ created_at timestamptz not null default now(),
+ check (expires_at > created_at)
+);
+alter table public.couple_invitations enable row level security;
+-- No direct client access; invitation operations are RPC-only.
+
+create or replace function public.create_couple()
+returns uuid
+language plpgsql
+security definer
+set search_path = public, auth, pg_temp
+set row_security = off
+as $
+declare v_user uuid := auth.uid(); v_couple uuid;
+begin
+ if v_user is null then raise exception 'Authentication required'; end if;
+ if exists(select 1 from public.couple_members where user_id=v_user and member_status='active') then
+   raise exception 'User already belongs to an active couple';
+ end if;
+ insert into public.couples(created_by,status) values(v_user,'pending') returning id into v_couple;
+ insert into public.couple_members(couple_id,user_id,member_status,joined_at)
+ values(v_couple,v_user,'active',now());
+ return v_couple;
+end;
+$;
+
+create or replace function public.create_couple_invite(p_couple_id uuid, p_invited_email text default null)
+returns text
+language plpgsql
+security definer
+set search_path = public, auth, pg_temp
+set row_security = off
+as $
+declare v_user uuid := auth.uid(); v_token text; v_active_count integer;
+begin
+ if v_user is null then raise exception 'Authentication required'; end if;
+ if not public.is_active_couple_member(p_couple_id,v_user) then raise exception 'Not a member of this couple'; end if;
+ select count(*) into v_active_count from public.couple_members
+ where couple_id=p_couple_id and member_status='active';
+ if v_active_count >= 2 then raise exception 'Couple already has two active members'; end if;
+ if exists(select 1 from public.couple_invitations
+   where couple_id=p_couple_id and accepted_at is null and revoked_at is null and expires_at>now()) then
+   raise exception 'An active invitation already exists';
+ end if;
+ v_token := encode(gen_random_bytes(32),'hex');
+ insert into public.couple_invitations(couple_id,invited_by,invited_email,token_hash,expires_at)
+ values(p_couple_id,v_user,nullif(lower(trim(p_invited_email)),''),encode(digest(v_token,'sha256'),'hex'),now()+interval '7 days');
+ return v_token;
+end;
+$;
+
+create or replace function public.accept_couple_invite(p_token text)
+returns uuid
+language plpgsql
+security definer
+set search_path = public, auth, pg_temp
+set row_security = off
+as $
+declare v_user uuid := auth.uid(); v_email text := lower(coalesce(auth.jwt()->>'email',''));
+ v_inv public.couple_invitations%rowtype; v_count integer;
+begin
+ if v_user is null then raise exception 'Authentication required'; end if;
+ if p_token is null or length(p_token)<32 then raise exception 'Invalid invitation'; end if;
+ select * into v_inv from public.couple_invitations
+ where token_hash=encode(digest(p_token,'sha256'),'hex')
+   and accepted_at is null and revoked_at is null and expires_at>now()
+ for update;
+ if not found then raise exception 'Invitation is invalid or expired'; end if;
+ if v_inv.invited_email is not null and v_inv.invited_email<>v_email then
+   raise exception 'Invitation belongs to a different email address';
+ end if;
+ if exists(select 1 from public.couple_members where user_id=v_user and member_status='active') then
+   raise exception 'User already belongs to an active couple';
+ end if;
+ select count(*) into v_count from public.couple_members
+ where couple_id=v_inv.couple_id and member_status='active';
+ if v_count>=2 then raise exception 'Couple already has two active members'; end if;
+ insert into public.couple_members(couple_id,user_id,member_status,joined_at)
+ values(v_inv.couple_id,v_user,'active',now())
+ on conflict(couple_id,user_id) do update set member_status='active',joined_at=now();
+ update public.couple_invitations set accepted_by=v_user,accepted_at=now() where id=v_inv.id;
+ update public.couples set status='active',activated_at=coalesce(activated_at,now())
+ where id=v_inv.couple_id;
+ return v_inv.couple_id;
+end;
+$;
+
+create or replace function public.revoke_couple_invite(p_invitation_id uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, auth, pg_temp
+set row_security = off
+as $
+begin
+ update public.couple_invitations i set revoked_at=now()
+ where i.id=p_invitation_id and i.invited_by=auth.uid()
+   and i.accepted_at is null and i.revoked_at is null;
+ return found;
+end;
+$;
+
+-- Sharing is opt-in per category. A user can grant/revoke only their own data.
+create or replace function public.set_sharing_permission(
+ p_couple_id uuid, p_recipient_id uuid, p_data_category text, p_granted boolean
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public, auth, pg_temp
+set row_security = off
+as $
+declare v_owner uuid := auth.uid(); v_id uuid;
+begin
+ if v_owner is null then raise exception 'Authentication required'; end if;
+ if p_data_category not in ('weight_trend','body_metrics','steps','activity','exercise',
+   'nutrition_summary','water_summary','sleep_summary','weekly_progress','achievements') then
+   raise exception 'Unsupported sharing category';
+ end if;
+ if p_recipient_id=v_owner or not public.is_active_couple_member(p_couple_id,v_owner)
+   or not public.is_active_couple_member(p_couple_id,p_recipient_id) then
+   raise exception 'Both users must be active members of the same couple';
+ end if;
+ insert into public.sharing_permissions(couple_id,owner_id,recipient_id,data_category,
+   permission_status,granted_at,revoked_at)
+ values(p_couple_id,v_owner,p_recipient_id,p_data_category,
+   case when p_granted then 'granted' else 'revoked' end,
+   case when p_granted then now() else null end,
+   case when p_granted then null else now() end)
+ on conflict(couple_id,owner_id,recipient_id,data_category)
+ do update set permission_status=excluded.permission_status,
+   granted_at=excluded.granted_at,revoked_at=excluded.revoked_at
+ returning id into v_id;
+ return v_id;
+end;
+$;
+
+revoke all on function public.create_couple() from public;
+revoke all on function public.create_couple_invite(uuid,text) from public;
+revoke all on function public.accept_couple_invite(text) from public;
+revoke all on function public.revoke_couple_invite(uuid) from public;
+revoke all on function public.set_sharing_permission(uuid,uuid,text,boolean) from public;
+grant execute on function public.create_couple() to authenticated;
+grant execute on function public.create_couple_invite(uuid,text) to authenticated;
+grant execute on function public.accept_couple_invite(text) to authenticated;
+grant execute on function public.revoke_couple_invite(uuid) to authenticated;
+grant execute on function public.set_sharing_permission(uuid,uuid,text,boolean) to authenticated;
+
+-- Private object storage: each user's files live under their auth UUID folder.
+-- No public read access; sharing photos is intentionally not enabled here.
+insert into storage.buckets(id,name,public,file_size_limit,allowed_mime_types)
+values('health-private','health-private',false,10485760,
+ array['image/jpeg','image/png','image/webp'])
+on conflict(id) do update set public=false,file_size_limit=10485760,
+ allowed_mime_types=array['image/jpeg','image/png','image/webp'];
+
+drop policy if exists health_private_select_own on storage.objects;
+create policy health_private_select_own on storage.objects
+ for select to authenticated using (
+  bucket_id='health-private' and (storage.foldername(name))[1]=(select auth.uid())::text
+);
+drop policy if exists health_private_insert_own on storage.objects;
+create policy health_private_insert_own on storage.objects
+ for insert to authenticated with check (
+  bucket_id='health-private' and (storage.foldername(name))[1]=(select auth.uid())::text
+);
+drop policy if exists health_private_update_own on storage.objects;
+create policy health_private_update_own on storage.objects
+ for update to authenticated using (
+  bucket_id='health-private' and (storage.foldername(name))[1]=(select auth.uid())::text
+ ) with check (
+  bucket_id='health-private' and (storage.foldername(name))[1]=(select auth.uid())::text
+);
+drop policy if exists health_private_delete_own on storage.objects;
+create policy health_private_delete_own on storage.objects
+ for delete to authenticated using (
+  bucket_id='health-private' and (storage.foldername(name))[1]=(select auth.uid())::text
+);
+
+-- End security hardening. This draft still requires execution in a disposable
+-- Supabase project and independent review before production use.
+
 -- No client write policies for relationship grants or release/system tables.
 -- Server-side Edge Functions with narrowly scoped privileges must manage these.
 commit;
