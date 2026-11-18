@@ -298,7 +298,7 @@ do $$ declare t text; begin
  foreach t in array array[
  'health_goals','weight_records','body_metrics','body_measurements','health_photos',
  'food_records','water_records','activity_records','exercise_sessions','sleep_records',
- 'device_connections','ai_insights','daily_reports','weekly_reports','monthly_reports',
+ 'device_connections','ai_conversations','ai_insights','daily_reports','weekly_reports','monthly_reports',
  'user_reminders','notifications'
  ] loop
  execute format(
