@@ -1,0 +1,29 @@
+name: Validate BLACK GOLD Supabase
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/**'
+      - '.github/workflows/validate-supabase.yml'
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Start local Supabase
+        run: supabase start --exclude studio,edge-runtime,logflare,vector,supavisor
+      - name: Apply migrations to disposable local database
+        run: supabase db reset --local
+      - name: Lint database schema
+        run: supabase db lint --local --fail-on error
+      - name: Stop local Supabase
+        if: always()
+        run: supabase stop --no-backup
