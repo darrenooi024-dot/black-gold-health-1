@@ -1,0 +1,43 @@
+name: Validate BLACK GOLD Web
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - '.github/workflows/validate-web.yml'
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check embedded JavaScript syntax
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          html = Path('web/index.html').read_text(encoding='utf-8')
+          scripts = re.findall(r'<script>([\\s\\S]*?)</script>', html)
+          if not scripts:
+              raise SystemExit('No inline application script found')
+          Path('/tmp/blackgold-app.js').write_text('\\n'.join(scripts), encoding='utf-8')
+          required = ['swimStroke', 'swimPoolLength', 'swimLaps', 'speedKmh']
+          missing = [item for item in required if item not in html]
+          if missing:
+              raise SystemExit('Missing swim tracking fields: ' + ', '.join(missing))
+          print('HTML and required swim tracking fields found.')
+          PY
+          node --check /tmp/blackgold-app.js
+      - name: Check required web app files
+        run: |
+          test -f web/index.html
+          test -f web/manifest.webmanifest
+          test -f web/sw.js
+          test -f web/icon.svg
