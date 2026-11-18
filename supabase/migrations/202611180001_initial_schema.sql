@@ -305,7 +305,7 @@ do $$ declare t text; begin
  'create policy %I on public.%I for all to authenticated using (user_id=(select auth.uid())) with check (user_id=(select auth.uid()))',
  'owner_all_'||t,t);
  end loop;
-end $;
+end $$;
 
 create policy upgrade_request_owner_all on public.upgrade_requests for all to authenticated
  using(submitted_by=(select auth.uid()))
