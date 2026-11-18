@@ -24,10 +24,10 @@ jobs:
           from pathlib import Path
           import re
           html = Path('web/index.html').read_text(encoding='utf-8')
-          scripts = re.findall(r'<script>([\\s\\S]*?)</script>', html)
+          scripts = re.findall(r'<script>(.*?)</script>', html, re.S)
           if not scripts:
               raise SystemExit('No inline application script found')
-          Path('/tmp/blackgold-app.js').write_text('\\n'.join(scripts), encoding='utf-8')
+          Path('/tmp/blackgold-app.js').write_text('\n'.join(scripts), encoding='utf-8')
           required = ['swimStroke', 'swimPoolLength', 'swimLaps', 'speedKmh']
           missing = [item for item in required if item not in html]
           if missing:
