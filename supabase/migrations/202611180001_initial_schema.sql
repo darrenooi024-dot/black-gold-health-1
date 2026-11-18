@@ -299,13 +299,17 @@ do $$ declare t text; begin
  'health_goals','weight_records','body_metrics','body_measurements','health_photos',
  'food_records','water_records','activity_records','exercise_sessions','sleep_records',
  'device_connections','ai_insights','daily_reports','weekly_reports','monthly_reports',
- 'user_reminders','notifications','upgrade_requests'
+ 'user_reminders','notifications'
  ] loop
  execute format(
  'create policy %I on public.%I for all to authenticated using (user_id=(select auth.uid())) with check (user_id=(select auth.uid()))',
  'owner_all_'||t,t);
  end loop;
-end $$;
+end $;
+
+create policy upgrade_request_owner_all on public.upgrade_requests for all to authenticated
+ using(submitted_by=(select auth.uid()))
+ with check(submitted_by=(select auth.uid()));
 
 create policy profile_owner_select on public.profiles for select to authenticated
  using(user_id=(select auth.uid()));
