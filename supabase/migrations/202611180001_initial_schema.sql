@@ -524,7 +524,7 @@ begin
    'nutrition_summary','water_summary','sleep_summary','weekly_progress','achievements') then
    raise exception 'Unsupported sharing category';
  end if;
- if p_recipient_id=v_owner or not public.is_active_couple_member(p_couple_id,v_owner)
+ if p_recipient_id=v_owner or not public.is_active_couple_member(p_couple_id)
    or not exists(select 1 from public.couple_members cm where cm.couple_id=p_couple_id and cm.user_id=p_recipient_id and cm.member_status='active') then
    raise exception 'Both users must be active members of the same couple';
  end if;
