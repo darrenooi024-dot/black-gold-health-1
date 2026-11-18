@@ -4,14 +4,14 @@
 
 ## 当前包含
 
-- `web/`：可在手机浏览器运行的记录型 Web/PWA 原型。
+- `web/`：可在手机浏览器运行的记录型 Web/PWA 原型，包含体重、身体组成、饮食、饮水、运动、游泳专用字段、睡眠、双人本机档案及 JSON 备份。
 - `android/`：Kotlin + Jetpack Compose 原生 Android UI 起始工程。
 - `supabase/migrations/`：双人账户、健康记录、授权共享、AI 对话、版本与回滚等数据库草案。
-- `.github/workflows/`：Android Debug APK 自动构建工作流。
+- `.github/workflows/`：Android Debug APK 自动构建及 Web 内嵌 JavaScript 语法检查工作流。
 
 ## 运行 Web 原型
 
-可直接用浏览器打开 `web/index.html`；PWA 安装通常需要 HTTPS 或 localhost。Web 原型目前把数据保存在当前浏览器的 localStorage，可导入/导出 JSON。它不是云同步版本。
+可直接用浏览器打开 `web/index.html`；PWA 安装通常需要 HTTPS 或 localhost。Web 原型目前把数据保存在当前浏览器的 localStorage，可导入/导出 JSON。它不是云同步版本。游泳记录可填写泳姿、泳池长度、趟数、训练总时长和休息时间，并自动计算距离及平均速度。照片目前只预览，不会随记录保存，也不会上传。
 
 ## 构建 Android APK
 
