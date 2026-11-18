@@ -4,6 +4,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val supabaseUrl = System.getenv("SUPABASE_URL") ?: ""
+val supabasePublishableKey = System.getenv("SUPABASE_PUBLISHABLE_KEY") ?: ""
+
 android {
     namespace = "com.blackgold.health"
     compileSdk = 35
@@ -11,8 +14,10 @@ android {
         applicationId = "com.blackgold.health"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.0.2"
+        buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
+        buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\"$supabasePublishableKey\"")
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -21,7 +26,10 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
 }
 
 dependencies {
