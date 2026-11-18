@@ -341,23 +341,23 @@ create policy device_sync_logs_owner_select on public.device_sync_logs for selec
 -- SECURITY HARDENING
 -- SECURITY DEFINER membership helper avoids recursive RLS when policies inspect
 -- couple_members from policies on couples/couple_members themselves.
-create or replace function public.is_active_couple_member(p_couple_id uuid, p_user_id uuid default auth.uid())
+create or replace function public.is_active_couple_member(p_couple_id uuid)
 returns boolean
 language sql
 stable
 security definer
 set search_path = public, auth, pg_temp
 set row_security = off
-as $
+as $$
  select exists (
    select 1 from public.couple_members cm
    where cm.couple_id = p_couple_id
-     and cm.user_id = p_user_id
+     and cm.user_id = auth.uid()
      and cm.member_status = 'active'
  );
-$;
-revoke all on function public.is_active_couple_member(uuid,uuid) from public;
-grant execute on function public.is_active_couple_member(uuid,uuid) to authenticated;
+$$;
+revoke all on function public.is_active_couple_member(uuid) from public;
+grant execute on function public.is_active_couple_member(uuid) to authenticated;
 
 drop policy if exists couple_member_select on public.couples;
 create policy couple_member_select on public.couples
@@ -378,14 +378,14 @@ returns trigger
 language plpgsql
 security definer
 set search_path = public, auth, pg_temp
-as $
+as $$
 begin
  insert into public.profiles(user_id, display_name)
  values (new.id, nullif(trim(coalesce(new.raw_user_meta_data->>'display_name','')), ''))
  on conflict (user_id) do nothing;
  return new;
 end;
-$;
+$$;
 drop trigger if exists on_auth_user_created_profile on auth.users;
 create trigger on_auth_user_created_profile
  after insert on auth.users
@@ -415,7 +415,7 @@ language plpgsql
 security definer
 set search_path = public, auth, pg_temp
 set row_security = off
-as $
+as $$
 declare v_user uuid := auth.uid(); v_couple uuid;
 begin
  if v_user is null then raise exception 'Authentication required'; end if;
@@ -427,7 +427,7 @@ begin
  values(v_couple,v_user,'active',now());
  return v_couple;
 end;
-$;
+$$;
 
 create or replace function public.create_couple_invite(p_couple_id uuid, p_invited_email text default null)
 returns text
@@ -435,11 +435,12 @@ language plpgsql
 security definer
 set search_path = public, auth, pg_temp
 set row_security = off
-as $
+as $$
 declare v_user uuid := auth.uid(); v_token text; v_active_count integer;
 begin
  if v_user is null then raise exception 'Authentication required'; end if;
- if not public.is_active_couple_member(p_couple_id,v_user) then raise exception 'Not a member of this couple'; end if;
+ if not public.is_active_couple_member(p_couple_id) then raise exception 'Not a member of this couple'; end if;
+ perform 1 from public.couples where id=p_couple_id for update;
  select count(*) into v_active_count from public.couple_members
  where couple_id=p_couple_id and member_status='active';
  if v_active_count >= 2 then raise exception 'Couple already has two active members'; end if;
@@ -452,7 +453,7 @@ begin
  values(p_couple_id,v_user,nullif(lower(trim(p_invited_email)),''),encode(digest(v_token,'sha256'),'hex'),now()+interval '7 days');
  return v_token;
 end;
-$;
+$$;
 
 create or replace function public.accept_couple_invite(p_token text)
 returns uuid
@@ -460,7 +461,7 @@ language plpgsql
 security definer
 set search_path = public, auth, pg_temp
 set row_security = off
-as $
+as $$
 declare v_user uuid := auth.uid(); v_email text := lower(coalesce(auth.jwt()->>'email',''));
  v_inv public.couple_invitations%rowtype; v_count integer;
 begin
@@ -471,6 +472,7 @@ begin
    and accepted_at is null and revoked_at is null and expires_at>now()
  for update;
  if not found then raise exception 'Invitation is invalid or expired'; end if;
+ perform 1 from public.couples where id=v_inv.couple_id for update;
  if v_inv.invited_email is not null and v_inv.invited_email<>v_email then
    raise exception 'Invitation belongs to a different email address';
  end if;
@@ -488,7 +490,7 @@ begin
  where id=v_inv.couple_id;
  return v_inv.couple_id;
 end;
-$;
+$$;
 
 create or replace function public.revoke_couple_invite(p_invitation_id uuid)
 returns boolean
@@ -496,14 +498,14 @@ language plpgsql
 security definer
 set search_path = public, auth, pg_temp
 set row_security = off
-as $
+as $$
 begin
  update public.couple_invitations i set revoked_at=now()
  where i.id=p_invitation_id and i.invited_by=auth.uid()
    and i.accepted_at is null and i.revoked_at is null;
  return found;
 end;
-$;
+$$;
 
 -- Sharing is opt-in per category. A user can grant/revoke only their own data.
 create or replace function public.set_sharing_permission(
@@ -514,7 +516,7 @@ language plpgsql
 security definer
 set search_path = public, auth, pg_temp
 set row_security = off
-as $
+as $$
 declare v_owner uuid := auth.uid(); v_id uuid;
 begin
  if v_owner is null then raise exception 'Authentication required'; end if;
@@ -523,7 +525,7 @@ begin
    raise exception 'Unsupported sharing category';
  end if;
  if p_recipient_id=v_owner or not public.is_active_couple_member(p_couple_id,v_owner)
-   or not public.is_active_couple_member(p_couple_id,p_recipient_id) then
+   or not exists(select 1 from public.couple_members cm where cm.couple_id=p_couple_id and cm.user_id=p_recipient_id and cm.member_status='active') then
    raise exception 'Both users must be active members of the same couple';
  end if;
  insert into public.sharing_permissions(couple_id,owner_id,recipient_id,data_category,
@@ -538,7 +540,7 @@ begin
  returning id into v_id;
  return v_id;
 end;
-$;
+$$;
 
 revoke all on function public.create_couple() from public;
 revoke all on function public.create_couple_invite(uuid,text) from public;
